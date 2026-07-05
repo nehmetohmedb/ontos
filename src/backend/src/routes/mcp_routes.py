@@ -11,7 +11,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, Query, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
@@ -441,6 +441,7 @@ async def mcp_sse_stream(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    api_key: Optional[str] = Query(None, alias="api_key", description="API key fallback for clients that cannot set custom headers (e.g. Kasal)"),
     mcp_session_id: Optional[str] = Header(None, alias="MCP-Session-Id"),
 ):
     """
@@ -457,7 +458,7 @@ async def mcp_sse_stream(
         )
     
     # Validate API key
-    token_info = validate_api_key(db, x_api_key)
+    token_info = validate_api_key(db, x_api_key or api_key)
     if not token_info:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -499,6 +500,7 @@ async def mcp_handler(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    api_key: Optional[str] = Query(None, alias="api_key", description="API key fallback for clients that cannot set custom headers (e.g. Kasal)"),
     mcp_session_id: Optional[str] = Header(None, alias="MCP-Session-Id"),
     mcp_protocol_version: Optional[str] = Header(None, alias="MCP-Protocol-Version"),
 ):
@@ -530,7 +532,7 @@ async def mcp_handler(
         return JSONResponse(content=response_data)
     
     # Validate API key
-    token_info = validate_api_key(db, x_api_key)
+    token_info = validate_api_key(db, x_api_key or api_key)
     if not token_info:
         audit_manager.log_action(
             db=db,
@@ -613,6 +615,7 @@ async def mcp_delete_session(
     audit_manager: AuditManagerDep,
     db: Session = Depends(get_db),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    api_key: Optional[str] = Query(None, alias="api_key", description="API key fallback for clients that cannot set custom headers (e.g. Kasal)"),
     mcp_session_id: Optional[str] = Header(None, alias="MCP-Session-Id"),
 ):
     """
@@ -621,7 +624,7 @@ async def mcp_delete_session(
     Clients should call this when they no longer need the session.
     """
     # Validate API key
-    token_info = validate_api_key(db, x_api_key)
+    token_info = validate_api_key(db, x_api_key or api_key)
     if not token_info:
         audit_manager.log_action(
             db=db,
