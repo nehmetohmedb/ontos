@@ -380,6 +380,53 @@ def validate_api_key(
     return token_manager.validate_token(x_api_key)
 
 
+IDENTITY_TOKEN_NAME_PREFIX = "identity:"
+
+
+def resolve_identity_bound_token(request: Request, db: Session):
+    """Server-side identity binding: when no API key is presented, look up an
+    ACTIVE MCP token named 'identity:<caller-email>' and authorize with ITS
+    scopes.
+
+    The caller email comes from the Databricks Apps ingress
+    (X-Forwarded-Email), which strips/sets these headers itself — clients
+    cannot spoof them. The plaintext key never travels over the wire: proving
+    the Databricks identity replaces proving possession of the key, while
+    every governance rule stays on the token record (scopes, expiry,
+    revocation, last-used tracking, visible in Settings > MCP).
+
+    This exists for MCP clients that can only send an Authorization header
+    (which the Apps ingress requires for its own OAuth) — e.g. Kasal.
+    """
+    email = (request.headers.get("X-Forwarded-Email")
+             or request.headers.get("X-Forwarded-User"))
+    if not email:
+        return None
+    try:
+        from src.repositories.mcp_tokens_repository import mcp_tokens_repo
+        from src.controller.mcp_tokens_manager import MCPTokenInfo
+        expected_name = f"{IDENTITY_TOKEN_NAME_PREFIX}{email}"
+        for db_token in mcp_tokens_repo.list_all(db=db, include_inactive=False, limit=1000):
+            if db_token.name != expected_name:
+                continue
+            if db_token.is_expired:
+                logger.warning(f"Identity-bound MCP token for {email} has expired")
+                return None
+            mcp_tokens_repo.update_last_used(db, db_token.id)
+            logger.info(f"MCP authorized via identity-bound token '{db_token.name}' "
+                        f"(scopes={db_token.scopes})")
+            return MCPTokenInfo(
+                id=db_token.id, name=db_token.name,
+                scopes=db_token.scopes or [],
+                created_by=db_token.created_by,
+                created_at=db_token.created_at,
+                expires_at=db_token.expires_at,
+            )
+    except Exception as e:
+        logger.warning(f"Identity-bound token lookup failed for {email}: {e}")
+    return None
+
+
 async def sse_event_generator(
     response_data: Dict[str, Any],
     session_id: Optional[str] = None
@@ -458,7 +505,8 @@ async def mcp_sse_stream(
         )
     
     # Validate API key
-    token_info = validate_api_key(db, x_api_key or api_key)
+    token_info = (validate_api_key(db, x_api_key or api_key)
+                  or resolve_identity_bound_token(request, db))
     if not token_info:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -532,7 +580,8 @@ async def mcp_handler(
         return JSONResponse(content=response_data)
     
     # Validate API key
-    token_info = validate_api_key(db, x_api_key or api_key)
+    token_info = (validate_api_key(db, x_api_key or api_key)
+                  or resolve_identity_bound_token(request, db))
     if not token_info:
         audit_manager.log_action(
             db=db,
@@ -624,7 +673,8 @@ async def mcp_delete_session(
     Clients should call this when they no longer need the session.
     """
     # Validate API key
-    token_info = validate_api_key(db, x_api_key or api_key)
+    token_info = (validate_api_key(db, x_api_key or api_key)
+                  or resolve_identity_bound_token(request, db))
     if not token_info:
         audit_manager.log_action(
             db=db,
